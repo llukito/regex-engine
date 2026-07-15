@@ -1,4 +1,5 @@
 *.o
 *.out
 build/
-.DS_Storeoracle/
+.DS_Store
+oracle/
