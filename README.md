@@ -5,7 +5,8 @@ A small regular-expression engine in C:
 1. **Parse** a pattern into an AST  
 2. **Thompson construction** → NFA with ε-transitions  
 3. **Subset construction** → DFA  
-4. **Match** by running the DFA (full-string match)
+4. **Minimize** the DFA (optional; same language, fewer states)  
+5. **Match** by running the DFA (full-string match)
 
 ## Supported syntax
 
@@ -38,8 +39,8 @@ src/parser.h   regex_parse() API
 src/parser.c   recursive-descent parser
 src/nfa.h      NFA types, Thompson build, match, print
 src/nfa.c      fragment-based NFA construction + simulation
-src/dfa.h      DFA types, subset construction, match, print
-src/dfa.c      subset construction + DFA matcher
+src/dfa.h      DFA types, subset construction, minimize, match, print
+src/dfa.c      subset construction, minimization, DFA matcher
 src/match.c    CLI: pattern + string → MATCH / NOMATCH
 tests/         unit tests and a small demo
 ```
@@ -60,17 +61,21 @@ ast_free(ast);
 Dfa *dfa = dfa_from_nfa(nfa);
 nfa_free(nfa);
 
-dfa_print(dfa);                   /* debug: transition table */
-int ok = dfa_match(dfa, "abbd");  /* 1 = full match */
+Dfa *min = dfa_minimize(dfa);     /* language-equivalent, fewer states */
 dfa_free(dfa);
+
+dfa_print(min);                   /* debug: transition table */
+int ok = dfa_match(min, "abbd");  /* 1 = full match */
+dfa_free(min);
 ```
 
 ### CLI matcher
 
 ```sh
 make build/match
-./build/match 'a(b|c)*d' abbd    # prints MATCH
-./build/match '^[0-9]+$' 42a     # prints NOMATCH
+./build/match 'a(b|c)*d' abbd         # prints MATCH
+./build/match '^[0-9]+$' 42a          # prints NOMATCH
+./build/match --min 'a(b|c)*d' abbd   # same, via minimized DFA
 ```
 
 ### Tests

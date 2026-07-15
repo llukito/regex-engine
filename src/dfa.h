@@ -54,4 +54,12 @@ void dfa_print(const Dfa *dfa);
  */
 int dfa_match(const Dfa *dfa, const char *input);
 
+/*
+ * Minimize a DFA via reachable-state pruning and partition refinement
+ * (Hopcroft/Moore style). Returns a new DFA that accepts exactly the
+ * same language, typically with fewer states. The input DFA is not
+ * modified. Returns NULL on failure; free with dfa_free().
+ */
+Dfa *dfa_minimize(const Dfa *dfa);
+
 #endif /* REGEX_DFA_H */

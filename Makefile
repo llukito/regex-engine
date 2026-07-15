@@ -5,7 +5,7 @@ OBJ     = $(SRC:src/%.c=build/%.o)
 
 .PHONY: all test clean demo match
 
-all: build/test_parser build/test_nfa build/test_dfa build/match
+all: build/test_parser build/test_nfa build/test_dfa build/test_minimize build/match
 
 build:
 	mkdir -p build
@@ -22,16 +22,20 @@ build/test_nfa: tests/test_nfa.c $(OBJ) | build
 build/test_dfa: tests/test_dfa.c $(OBJ) | build
 	$(CC) $(CFLAGS) -o $@ tests/test_dfa.c $(OBJ)
 
+build/test_minimize: tests/test_minimize.c $(OBJ) | build
+	$(CC) $(CFLAGS) -o $@ tests/test_minimize.c $(OBJ)
+
 build/match: src/match.c $(OBJ) | build
 	$(CC) $(CFLAGS) -o $@ src/match.c $(OBJ)
 
-test: build/test_parser build/test_nfa build/test_dfa
+test: build/test_parser build/test_nfa build/test_dfa build/test_minimize
 	./build/test_parser
 	./build/test_nfa
 	./build/test_dfa
+	./build/test_minimize
 
 match: build/match
-	@echo "Usage: ./build/match <pattern> <string>"
+	@echo "Usage: ./build/match [--min] <pattern> <string>"
 
 build/demo: tests/demo.c $(OBJ) | build
 	$(CC) $(CFLAGS) -o $@ tests/demo.c $(OBJ)

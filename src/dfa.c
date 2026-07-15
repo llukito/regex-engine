@@ -405,3 +405,257 @@ int dfa_match(const Dfa *dfa, const char *input)
     }
     return dfa->states[s].accept;
 }
+
+/*
+ * DFA minimization
+ * ----------------
+ * 1. Drop states unreachable from the start state.
+ * 2. Refine the partition {accepting, non-accepting} until it is stable:
+ *    two states stay equivalent only if, for every byte c, their c-
+ *    successors lie in the same block (Moore-style refinement).
+ * 3. Emit one DFA state per block.
+ *
+ * The result is a smallest DFA for the same language (unique up to
+ * renaming of states for a complete DFA over a fixed alphabet).
+ */
+
+Dfa *dfa_minimize(const Dfa *src)
+{
+    if (!src || src->nstates == 0 || src->start < 0
+        || (size_t)src->start >= src->nstates)
+        return NULL;
+
+    const size_t n_old = src->nstates;
+
+    /* ---- reachable from start --------------------------------------- */
+    unsigned char *reach = calloc(n_old, 1);
+    int *queue = malloc(n_old * sizeof(int));
+    if (!reach || !queue) {
+        free(reach);
+        free(queue);
+        return NULL;
+    }
+
+    int qh = 0, qt = 0;
+    reach[src->start] = 1;
+    queue[qt++] = src->start;
+    while (qh < qt) {
+        int s = queue[qh++];
+        for (int c = 0; c < DFA_ALPHABET; c++) {
+            int t = src->states[s].trans[c];
+            if (t < 0 || (size_t)t >= n_old)
+                continue;
+            if (!reach[t]) {
+                reach[t] = 1;
+                queue[qt++] = t;
+            }
+        }
+    }
+    free(queue);
+
+    size_t nr = 0;
+    for (size_t i = 0; i < n_old; i++) {
+        if (reach[i])
+            nr++;
+    }
+    if (nr == 0) {
+        free(reach);
+        return NULL;
+    }
+
+    int *old_of = malloc(nr * sizeof(int));       /* compact -> old */
+    int *compact_of = malloc(n_old * sizeof(int)); /* old -> compact or -1 */
+    int *accept = malloc(nr * sizeof(int));
+    int *trans = malloc(nr * (size_t)DFA_ALPHABET * sizeof(int));
+    if (!old_of || !compact_of || !accept || !trans) {
+        free(reach);
+        free(old_of);
+        free(compact_of);
+        free(accept);
+        free(trans);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < n_old; i++)
+        compact_of[i] = -1;
+
+    size_t k = 0;
+    for (size_t i = 0; i < n_old; i++) {
+        if (!reach[i])
+            continue;
+        compact_of[i] = (int)k;
+        old_of[k] = (int)i;
+        k++;
+    }
+
+    for (size_t ci = 0; ci < nr; ci++) {
+        int oi = old_of[ci];
+        accept[ci] = src->states[oi].accept ? 1 : 0;
+        for (int c = 0; c < DFA_ALPHABET; c++) {
+            int t = src->states[oi].trans[c];
+            int ct = (t >= 0 && (size_t)t < n_old) ? compact_of[t] : -1;
+            /* Targets of reachable states are reachable in a total DFA;
+             * if not, point at self as a safe fallback. */
+            if (ct < 0)
+                ct = (int)ci;
+            trans[ci * DFA_ALPHABET + c] = ct;
+        }
+    }
+    free(reach);
+
+    /* ---- partition refinement --------------------------------------- */
+    int *block = malloc(nr * sizeof(int));
+    int *nblock = malloc(nr * sizeof(int));
+    if (!block || !nblock) {
+        free(old_of);
+        free(compact_of);
+        free(accept);
+        free(trans);
+        free(block);
+        free(nblock);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < nr; i++)
+        block[i] = accept[i]; /* 0 = reject, 1 = accept */
+
+    int changed = 1;
+    int nblocks = 0;
+    while (changed) {
+        changed = 0;
+        for (size_t i = 0; i < nr; i++)
+            nblock[i] = -1;
+
+        int nid = 0;
+        for (size_t s = 0; s < nr; s++) {
+            if (nblock[s] >= 0)
+                continue;
+            nblock[s] = nid;
+            for (size_t t = s + 1; t < nr; t++) {
+                if (nblock[t] >= 0)
+                    continue;
+                if (block[t] != block[s])
+                    continue;
+                int same = 1;
+                for (int c = 0; c < DFA_ALPHABET; c++) {
+                    int ds = trans[s * DFA_ALPHABET + c];
+                    int dt = trans[t * DFA_ALPHABET + c];
+                    if (block[ds] != block[dt]) {
+                        same = 0;
+                        break;
+                    }
+                }
+                if (same)
+                    nblock[t] = nid;
+            }
+            nid++;
+        }
+
+        /* Stable iff the equivalence relation is unchanged. */
+        for (size_t s = 0; s < nr && !changed; s++) {
+            for (size_t t = s + 1; t < nr; t++) {
+                int same_old = (block[s] == block[t]);
+                int same_new = (nblock[s] == nblock[t]);
+                if (same_old != same_new) {
+                    changed = 1;
+                    break;
+                }
+            }
+        }
+
+        memcpy(block, nblock, nr * sizeof(int));
+        nblocks = nid;
+    }
+
+    /* ---- build minimized DFA ---------------------------------------- */
+    int *rep = malloc((size_t)nblocks * sizeof(int));
+    if (!rep) {
+        free(old_of);
+        free(compact_of);
+        free(accept);
+        free(trans);
+        free(block);
+        free(nblock);
+        return NULL;
+    }
+    for (int b = 0; b < nblocks; b++)
+        rep[b] = -1;
+    for (size_t s = 0; s < nr; s++) {
+        int b = block[s];
+        if (rep[b] < 0)
+            rep[b] = (int)s;
+    }
+
+    Dfa *out = calloc(1, sizeof(*out));
+    if (!out) {
+        free(old_of);
+        free(compact_of);
+        free(accept);
+        free(trans);
+        free(block);
+        free(nblock);
+        free(rep);
+        return NULL;
+    }
+
+    out->states = calloc((size_t)nblocks, sizeof(DfaState));
+    if (!out->states) {
+        free(out);
+        free(old_of);
+        free(compact_of);
+        free(accept);
+        free(trans);
+        free(block);
+        free(nblock);
+        free(rep);
+        return NULL;
+    }
+
+    out->nstates = (size_t)nblocks;
+    out->cap_states = (size_t)nblocks;
+    out->start = block[compact_of[src->start]];
+
+    for (int b = 0; b < nblocks; b++) {
+        int r = rep[b];
+        out->states[b].id = b;
+        out->states[b].accept = accept[r];
+        for (int c = 0; c < DFA_ALPHABET; c++) {
+            int dest = trans[r * DFA_ALPHABET + c];
+            out->states[b].trans[c] = block[dest];
+        }
+    }
+
+    /* Image of the old dead state, or a non-accepting total sink. */
+    out->dead = -1;
+    if (src->dead >= 0 && (size_t)src->dead < n_old
+        && compact_of[src->dead] >= 0)
+        out->dead = block[compact_of[src->dead]];
+    if (out->dead < 0) {
+        for (int b = 0; b < nblocks; b++) {
+            if (out->states[b].accept)
+                continue;
+            int sink = 1;
+            for (int c = 0; c < DFA_ALPHABET; c++) {
+                if (out->states[b].trans[c] != b) {
+                    sink = 0;
+                    break;
+                }
+            }
+            if (sink) {
+                out->dead = b;
+                break;
+            }
+        }
+    }
+    if (out->dead < 0)
+        out->dead = 0;
+
+    free(old_of);
+    free(compact_of);
+    free(accept);
+    free(trans);
+    free(block);
+    free(nblock);
+    free(rep);
+    return out;
+}
