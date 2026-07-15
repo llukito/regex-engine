@@ -8,6 +8,8 @@ A small regular-expression engine in C:
 4. **Minimize** the DFA (optional; same language, fewer states)  
 5. **Match** by running the DFA (full-string match)
 
+Most callers only need the public API in `regex.h`.
+
 ## Supported syntax
 
 | Feature            | Example        |
@@ -33,6 +35,8 @@ Parentheses override precedence.
 ## Layout
 
 ```
+src/regex.h    public API: compile / match / free
+src/regex.c    pipeline wrapper (AST → NFA → DFA → match)
 src/ast.h      AST node types, constructors, grammar comment
 src/ast.c      AST construction, free, pretty-print
 src/parser.h   regex_parse() API
@@ -47,26 +51,37 @@ tests/         unit tests and a small demo
 
 ## Usage
 
-### Library
+### Library (recommended)
 
 ```c
-#include "parser.h"
-#include "nfa.h"
-#include "dfa.h"
+#include "regex.h"
 
-char err[128];
-AstNode *ast = regex_parse("a(b|c)*d", err, sizeof err);
-Nfa *nfa = nfa_from_ast(ast);
-ast_free(ast);
-Dfa *dfa = dfa_from_nfa(nfa);
-nfa_free(nfa);
+#include <stdio.h>
 
-Dfa *min = dfa_minimize(dfa);     /* language-equivalent, fewer states */
-dfa_free(dfa);
+int main(void)
+{
+    char err[128];
+    Regex *re = regex_compile("a(b|c)*d", REGEX_DEFAULT, err, sizeof err);
+    if (!re) {
+        fprintf(stderr, "compile error: %s\n", err);
+        return 1;
+    }
 
-dfa_print(min);                   /* debug: transition table */
-int ok = dfa_match(min, "abbd");  /* 1 = full match */
-dfa_free(min);
+    if (regex_match(re, "abbd"))
+        puts("MATCH");
+    else
+        puts("NOMATCH");
+
+    regex_free(re);
+    return 0;
+}
+```
+
+Pass `REGEX_MINIMIZE` instead of `REGEX_DEFAULT` to minimize the DFA after
+construction (same language, usually fewer states):
+
+```c
+Regex *re = regex_compile("a(b|c)*d", REGEX_MINIMIZE, err, sizeof err);
 ```
 
 ### CLI matcher
