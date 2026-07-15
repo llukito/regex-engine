@@ -409,15 +409,34 @@ int dfa_match(const Dfa *dfa, const char *input)
 /*
  * DFA minimization
  * ----------------
- * 1. Drop states unreachable from the start state.
- * 2. Refine the partition {accepting, non-accepting} until it is stable:
- *    two states stay equivalent only if, for every byte c, their c-
- *    successors lie in the same block (Moore-style refinement).
- * 3. Emit one DFA state per block.
+ * 1. Restrict to states reachable from the start state.
+ * 2. Table-filling: mark pairs of states distinguishable, starting from
+ *    accept vs non-accept, then repeatedly mark (p,q) if there exists a
+ *    symbol c with (δ(p,c), δ(q,c)) already distinguishable.
+ * 3. Union indistinguishable pairs into equivalence classes and emit one
+ *    DFA state per class.
  *
- * The result is a smallest DFA for the same language (unique up to
- * renaming of states for a complete DFA over a fixed alphabet).
+ * The result is a smallest DFA for the same language. Minimizing it again
+ * is a no-op on the state count (idempotent up to state renumbering).
  */
+
+/* Union-find with path compression. */
+static int uf_find(int *parent, int x)
+{
+    while (parent[x] != x) {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    return x;
+}
+
+static void uf_union(int *parent, int a, int b)
+{
+    a = uf_find(parent, a);
+    b = uf_find(parent, b);
+    if (a != b)
+        parent[b] = a;
+}
 
 Dfa *dfa_minimize(const Dfa *src)
 {
@@ -494,8 +513,8 @@ Dfa *dfa_minimize(const Dfa *src)
         for (int c = 0; c < DFA_ALPHABET; c++) {
             int t = src->states[oi].trans[c];
             int ct = (t >= 0 && (size_t)t < n_old) ? compact_of[t] : -1;
-            /* Targets of reachable states are reachable in a total DFA;
-             * if not, point at self as a safe fallback. */
+            /* Reachable states only transition to reachable states in a
+             * total DFA; fall back to self if a dangling edge appears. */
             if (ct < 0)
                 ct = (int)ci;
             trans[ci * DFA_ALPHABET + c] = ct;
@@ -503,98 +522,119 @@ Dfa *dfa_minimize(const Dfa *src)
     }
     free(reach);
 
-    /* ---- partition refinement --------------------------------------- */
-    int *block = malloc(nr * sizeof(int));
-    int *nblock = malloc(nr * sizeof(int));
-    if (!block || !nblock) {
+    /* ---- table filling: dist[i][j] for i < j at index i*nr + j ------- */
+    unsigned char *dist = calloc(nr * nr, 1);
+    int *parent = malloc(nr * sizeof(int));
+    if (!dist || !parent) {
         free(old_of);
         free(compact_of);
         free(accept);
         free(trans);
-        free(block);
-        free(nblock);
+        free(dist);
+        free(parent);
         return NULL;
     }
 
     for (size_t i = 0; i < nr; i++)
-        block[i] = accept[i]; /* 0 = reject, 1 = accept */
+        parent[i] = (int)i;
+
+    for (size_t i = 0; i < nr; i++) {
+        for (size_t j = i + 1; j < nr; j++) {
+            if (accept[i] != accept[j])
+                dist[i * nr + j] = 1;
+        }
+    }
 
     int changed = 1;
-    int nblocks = 0;
     while (changed) {
         changed = 0;
-        for (size_t i = 0; i < nr; i++)
-            nblock[i] = -1;
-
-        int nid = 0;
-        for (size_t s = 0; s < nr; s++) {
-            if (nblock[s] >= 0)
-                continue;
-            nblock[s] = nid;
-            for (size_t t = s + 1; t < nr; t++) {
-                if (nblock[t] >= 0)
+        for (size_t i = 0; i < nr; i++) {
+            for (size_t j = i + 1; j < nr; j++) {
+                if (dist[i * nr + j])
                     continue;
-                if (block[t] != block[s])
-                    continue;
-                int same = 1;
                 for (int c = 0; c < DFA_ALPHABET; c++) {
-                    int ds = trans[s * DFA_ALPHABET + c];
-                    int dt = trans[t * DFA_ALPHABET + c];
-                    if (block[ds] != block[dt]) {
-                        same = 0;
+                    int a = trans[i * DFA_ALPHABET + c];
+                    int b = trans[j * DFA_ALPHABET + c];
+                    if (a == b)
+                        continue;
+                    size_t lo = (size_t)(a < b ? a : b);
+                    size_t hi = (size_t)(a < b ? b : a);
+                    if (dist[lo * nr + hi]) {
+                        dist[i * nr + j] = 1;
+                        changed = 1;
                         break;
                     }
                 }
-                if (same)
-                    nblock[t] = nid;
-            }
-            nid++;
-        }
-
-        /* Stable iff the equivalence relation is unchanged. */
-        for (size_t s = 0; s < nr && !changed; s++) {
-            for (size_t t = s + 1; t < nr; t++) {
-                int same_old = (block[s] == block[t]);
-                int same_new = (nblock[s] == nblock[t]);
-                if (same_old != same_new) {
-                    changed = 1;
-                    break;
-                }
             }
         }
-
-        memcpy(block, nblock, nr * sizeof(int));
-        nblocks = nid;
     }
 
-    /* ---- build minimized DFA ---------------------------------------- */
-    int *rep = malloc((size_t)nblocks * sizeof(int));
-    if (!rep) {
+    /* Merge every indistinguishable pair. */
+    for (size_t i = 0; i < nr; i++) {
+        for (size_t j = i + 1; j < nr; j++) {
+            if (!dist[i * nr + j])
+                uf_union(parent, (int)i, (int)j);
+        }
+    }
+
+    /* Assign dense class ids 0..nblocks-1 in first-appearance order. */
+    int *root_class = malloc(nr * sizeof(int)); /* root -> class id, else -1 */
+    int *block = malloc(nr * sizeof(int));      /* compact state -> class */
+    if (!root_class || !block) {
         free(old_of);
         free(compact_of);
         free(accept);
         free(trans);
+        free(dist);
+        free(parent);
+        free(root_class);
         free(block);
-        free(nblock);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < nr; i++)
+        root_class[i] = -1;
+
+    int nblocks = 0;
+    for (size_t i = 0; i < nr; i++) {
+        int root = uf_find(parent, (int)i);
+        if (root_class[root] < 0)
+            root_class[root] = nblocks++;
+        block[i] = root_class[root];
+    }
+
+    int *class_rep = malloc((size_t)nblocks * sizeof(int));
+    if (!class_rep) {
+        free(old_of);
+        free(compact_of);
+        free(accept);
+        free(trans);
+        free(dist);
+        free(parent);
+        free(root_class);
+        free(block);
         return NULL;
     }
     for (int b = 0; b < nblocks; b++)
-        rep[b] = -1;
-    for (size_t s = 0; s < nr; s++) {
-        int b = block[s];
-        if (rep[b] < 0)
-            rep[b] = (int)s;
+        class_rep[b] = -1;
+    for (size_t i = 0; i < nr; i++) {
+        int cls = block[i];
+        if (class_rep[cls] < 0)
+            class_rep[cls] = (int)i;
     }
 
+    /* ---- build minimized DFA ---------------------------------------- */
     Dfa *out = calloc(1, sizeof(*out));
     if (!out) {
         free(old_of);
         free(compact_of);
         free(accept);
         free(trans);
+        free(dist);
+        free(parent);
+        free(root_class);
         free(block);
-        free(nblock);
-        free(rep);
+        free(class_rep);
         return NULL;
     }
 
@@ -605,9 +645,11 @@ Dfa *dfa_minimize(const Dfa *src)
         free(compact_of);
         free(accept);
         free(trans);
+        free(dist);
+        free(parent);
+        free(root_class);
         free(block);
-        free(nblock);
-        free(rep);
+        free(class_rep);
         return NULL;
     }
 
@@ -616,7 +658,7 @@ Dfa *dfa_minimize(const Dfa *src)
     out->start = block[compact_of[src->start]];
 
     for (int b = 0; b < nblocks; b++) {
-        int r = rep[b];
+        int r = class_rep[b];
         out->states[b].id = b;
         out->states[b].accept = accept[r];
         for (int c = 0; c < DFA_ALPHABET; c++) {
@@ -654,8 +696,10 @@ Dfa *dfa_minimize(const Dfa *src)
     free(compact_of);
     free(accept);
     free(trans);
+    free(dist);
+    free(parent);
+    free(root_class);
     free(block);
-    free(nblock);
-    free(rep);
+    free(class_rep);
     return out;
 }

@@ -130,7 +130,7 @@ static void expect_match_min(const char *pattern, const char *input, int want)
     dfa_free(min);
 }
 
-/* Minimizing twice is idempotent on state count. */
+/* Minimizing twice (or thrice) must not change the state count. */
 static void test_idempotent(const char *pattern)
 {
     Dfa *dfa = compile_dfa(pattern);
@@ -150,13 +150,27 @@ static void test_idempotent(const char *pattern)
         g_fail++;
         return;
     }
-    int ok = m1->nstates == m2->nstates;
-    check(ok, pattern[0] ? "minimize is idempotent on state count" : "minimize idempotent (empty pattern)");
-    if (!ok)
-        fprintf(stderr, "  pattern /%s/: %zu vs %zu\n",
-                pattern, m1->nstates, m2->nstates);
+    Dfa *m3 = dfa_minimize(m2);
+    if (!m3) {
+        dfa_free(m1);
+        dfa_free(m2);
+        g_fail++;
+        return;
+    }
+    int ok = m1->nstates == m2->nstates && m2->nstates == m3->nstates;
+    if (!ok) {
+        fprintf(stderr,
+                "FAIL  minimize not idempotent /%s/: %zu -> %zu -> %zu\n",
+                pattern, m1->nstates, m2->nstates, m3->nstates);
+        g_fail++;
+    } else {
+        printf("ok    minimize idempotent /%s/ (%zu states)\n",
+               pattern, m1->nstates);
+        g_pass++;
+    }
     dfa_free(m1);
     dfa_free(m2);
+    dfa_free(m3);
 }
 
 /* a|a should collapse compared to a naive construction that keeps both arms. */
@@ -257,9 +271,10 @@ int main(void)
         test_size_reduced_or_equal(patterns[p]);
 
     test_alt_same_literal_shrinks();
-    test_idempotent("a(b|c)*d");
-    test_idempotent("a|a");
-    test_idempotent(".*");
+
+    /* Idempotence on every pattern in the suite. */
+    for (size_t p = 0; p < np; p++)
+        test_idempotent(patterns[p]);
 
     /* Language equivalence: raw DFA vs minimized, full cross product. */
     for (size_t p = 0; p < np; p++) {
