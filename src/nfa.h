@@ -2,6 +2,7 @@
 #define REGEX_NFA_H
 
 #include "ast.h"
+#include "charset.h"
 
 #include <stddef.h>
 
@@ -13,7 +14,7 @@
  * A transition is one of:
  *   - epsilon          (no input consumed)
  *   - character        (exactly one byte)
- *   - character class  (ranges, optional negation; one byte consumed)
+ *   - character class  (256-bit membership bitmap; one byte consumed)
  *   - dot              (any byte consumed)
  *   - ^ / $ anchors    (zero-width; checked against input position)
  */
@@ -31,9 +32,7 @@ typedef struct NfaTrans {
     NfaTransType type;
     int to;                 /* destination state id */
     unsigned char ch;       /* NFA_TRANS_CHAR */
-    int negated;            /* NFA_TRANS_CLASS */
-    CharRange *ranges;      /* NFA_TRANS_CLASS; owned by the NFA */
-    size_t nranges;
+    CharBitmap bitmap;      /* NFA_TRANS_CLASS — negation already baked in */
 } NfaTrans;
 
 typedef struct NfaState {

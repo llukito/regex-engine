@@ -73,16 +73,10 @@ static int set_empty(const unsigned char *bits, size_t n)
 
 /* ---- NFA move / closure (local copies; nfa.c internals are private) --- */
 
+/* Hot path: class membership is a branchless bit test. */
 static int class_matches(const NfaTrans *t, unsigned char c)
 {
-    int in = 0;
-    for (size_t i = 0; i < t->nranges; i++) {
-        if (c >= t->ranges[i].lo && c <= t->ranges[i].hi) {
-            in = 1;
-            break;
-        }
-    }
-    return t->negated ? !in : in;
+    return char_bitmap_test(&t->bitmap, c);
 }
 
 static int trans_matches_char(const NfaTrans *t, unsigned char c)

@@ -10,7 +10,7 @@ all: build/test_parser build/test_nfa build/test_dfa build/test_minimize build/t
 build:
 	mkdir -p build
 
-build/%.o: src/%.c src/ast.h src/parser.h src/nfa.h src/dfa.h src/regex.h | build
+build/%.o: src/%.c src/ast.h src/parser.h src/nfa.h src/dfa.h src/regex.h src/charset.h | build
 	$(CC) $(CFLAGS) -c $< -o $@
 
 build/test_parser: tests/test_parser.c $(OBJ) | build

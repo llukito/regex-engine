@@ -138,23 +138,21 @@ static void add_class(Builder *b, int from, int to,
     if (!t)
         return;
 
-    CharRange *copy = NULL;
-    if (nranges > 0) {
-        copy = malloc(nranges * sizeof(*copy));
-        if (!copy) {
-            /* roll back the slot */
-            b->nfa->states[from].ntrans--;
-            b->failed = 1;
-            return;
-        }
-        memcpy(copy, ranges, nranges * sizeof(*copy));
-    }
+    CharBitmap bm;
+    /*
+     * Order matters for ICASE + negated classes:
+     *   1. Build the positive membership bitmap from ranges
+     *      (REGEX_ICASE has already expanded those ranges with case folds)
+     *   2. Apply negation last so uppercase/lowercase variants are both
+     *      excluded for patterns like (?i)[^a]
+     * Baking the final set into the bitmap keeps match as a bit test.
+     */
+    char_bitmap_from_ranges(&bm, ranges, nranges);
+    char_bitmap_apply_neg(&bm, negated ? 1u : 0u);
 
     t->type = NFA_TRANS_CLASS;
     t->to = to;
-    t->negated = negated;
-    t->ranges = copy;
-    t->nranges = nranges;
+    t->bitmap = bm;
 }
 
 static Frag make_symbol_frag(Builder *b, NfaTransType type,
@@ -328,8 +326,6 @@ void nfa_free(Nfa *nfa)
         return;
     for (size_t i = 0; i < nfa->nstates; i++) {
         NfaState *s = &nfa->states[i];
-        for (size_t j = 0; j < s->ntrans; j++)
-            free(s->trans[j].ranges);
         free(s->trans);
     }
     free(nfa->states);
@@ -357,21 +353,32 @@ static void print_trans(const NfaTrans *t)
     case NFA_TRANS_ANCHOR_END:
         fputs("$", stdout);
         break;
-    case NFA_TRANS_CLASS:
+    case NFA_TRANS_CLASS: {
+        /* Cold path: expand bitmap back to ranges for display. */
+        CharRange *ranges = NULL;
+        size_t nranges = 0;
         putchar('[');
-        if (t->negated)
-            putchar('^');
-        for (size_t i = 0; i < t->nranges; i++) {
-            CharRange r = t->ranges[i];
-            if (i > 0)
-                putchar(' ');
-            if (r.lo == r.hi)
-                printf("%c", r.lo);
-            else
-                printf("%c-%c", r.lo, r.hi);
+        if (char_bitmap_to_ranges(&t->bitmap, &ranges, &nranges)) {
+            for (size_t i = 0; i < nranges; i++) {
+                CharRange r = ranges[i];
+                if (i > 0)
+                    putchar(' ');
+                if (r.lo == r.hi) {
+                    if (r.lo >= 32 && r.lo < 127)
+                        printf("%c", r.lo);
+                    else
+                        printf("\\x%02x", r.lo);
+                } else {
+                    printf("%c-%c", r.lo, r.hi);
+                }
+            }
+            free(ranges);
+        } else {
+            fputs("…", stdout);
         }
         putchar(']');
         break;
+    }
     }
 }
 
@@ -406,16 +413,10 @@ void nfa_print(const Nfa *nfa)
 
 /* ---- simulation ------------------------------------------------------- */
 
+/* Hot path: class membership is a branchless bit test. */
 static int class_matches(const NfaTrans *t, unsigned char c)
 {
-    int in = 0;
-    for (size_t i = 0; i < t->nranges; i++) {
-        if (c >= t->ranges[i].lo && c <= t->ranges[i].hi) {
-            in = 1;
-            break;
-        }
-    }
-    return t->negated ? !in : in;
+    return char_bitmap_test(&t->bitmap, c);
 }
 
 static int trans_matches_char(const NfaTrans *t, unsigned char c)

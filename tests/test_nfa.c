@@ -199,7 +199,7 @@ static void test_question_structure(void)
     nfa_free(nfa);
 }
 
-/* Class [a-z]: 2 states, one CLASS transition with range a-z */
+/* Class [a-z]: 2 states, one CLASS transition with a-z bits set in bitmap */
 static void test_class_structure(void)
 {
     Nfa *nfa = compile("[a-z]");
@@ -211,18 +211,20 @@ static void test_class_structure(void)
     if (nfa->nstates == 2 && count_trans(nfa, NFA_TRANS_CLASS) == 1) {
         const NfaTrans *t = &nfa->states[nfa->start].trans[0];
         ok = t->type == NFA_TRANS_CLASS
-          && !t->negated
-          && t->nranges == 1
-          && t->ranges[0].lo == 'a'
-          && t->ranges[0].hi == 'z'
-          && t->to == nfa->accept;
+          && t->to == nfa->accept
+          && char_bitmap_test(&t->bitmap, 'a')
+          && char_bitmap_test(&t->bitmap, 'z')
+          && char_bitmap_test(&t->bitmap, 'm')
+          && !char_bitmap_test(&t->bitmap, 'A')
+          && !char_bitmap_test(&t->bitmap, '0')
+          && !char_bitmap_test(&t->bitmap, '{');
     }
     if (!ok) {
         fprintf(stderr, "FAIL  class structure\n");
         nfa_print(nfa);
         g_fail++;
     } else {
-        printf("ok    class [a-z] structure\n");
+        printf("ok    class [a-z] bitmap structure\n");
         g_pass++;
     }
     nfa_free(nfa);

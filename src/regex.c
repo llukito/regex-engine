@@ -3,8 +3,8 @@
 #include "parser.h"
 #include "nfa.h"
 #include "dfa.h"
+#include "charset.h"
 
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,104 +54,69 @@ static void clear_err(char *errmsg, size_t errmsg_size)
 /* ---- case-insensitive AST expansion ----------------------------------- */
 
 /*
- * REGEX_ICASE rewrites the AST so existing NFA/DFA code stays unchanged:
- *   - literal c     → character class containing tolower(c) and toupper(c)
- *   - [ranges]      → same class with every character's case variants added
- *   - [^ranges]     → expand the positive set the same way, keep negation
+ * REGEX_ICASE rewrites the AST using compile-time BYTE_TOLOWER/BYTE_TOUPPER
+ * maps and 256-bit bitmaps (see charset.h):
+ *   - literal c     → class of {fold_lower(c), fold_upper(c)}
+ *   - [ranges]      → class of every member plus both case folds
+ *   - [^ranges]     → same positive expansion, keep negated flag
  *
- * On allocation failure the node being rewritten is left unchanged and any
- * scratch buffers are freed. Sibling nodes already rewritten remain valid
- * AST so the caller can free the whole tree with ast_free().
+ * Fold maps cover 0..255 (high bytes are identity). Membership for the
+ * resulting class is later tested via branchless bitmap bit tests in the
+ * NFA/DFA.
+ *
+ * On allocation failure the node is left unchanged and scratch is freed.
+ * Sibling nodes already rewritten remain a valid tree for ast_free().
  */
 
-static int icase_push_range(CharRange **ranges, size_t *nranges, size_t *cap,
-                            unsigned char lo, unsigned char hi)
-{
-    if (lo > hi) {
-        unsigned char tmp = lo;
-        lo = hi;
-        hi = tmp;
-    }
-    if (*nranges >= *cap) {
-        size_t ncap = *cap ? *cap * 2 : 4;
-        CharRange *n = realloc(*ranges, ncap * sizeof(*n));
-        if (!n)
-            return 0;
-        *ranges = n;
-        *cap = ncap;
-    }
-    (*ranges)[*nranges].lo = lo;
-    (*ranges)[*nranges].hi = hi;
-    (*nranges)++;
-    return 1;
-}
-
-static int icase_add_char(CharRange **ranges, size_t *nranges, size_t *cap,
-                          unsigned char c)
-{
-    unsigned char lower = (unsigned char)tolower(c);
-    unsigned char upper = (unsigned char)toupper(c);
-    if (!icase_push_range(ranges, nranges, cap, lower, lower))
-        return 0;
-    if (upper != lower
-        && !icase_push_range(ranges, nranges, cap, upper, upper))
-        return 0;
-    return 1;
-}
-
 /*
- * Expand a class's ranges to include case variants.
- * Builds into a scratch buffer; only commits to the node on full success.
- * On failure: frees scratch, leaves node (and its original ranges) intact.
+ * Expand a class's *positive* membership with case folds, then write
+ * ranges back. The negated flag is left unchanged so NFA construction
+ * applies negation only after the expanded positive set is built:
+ *
+ *   [^a] + ICASE → positive {a,A} kept, negated=1
+ *               → NFA bitmap: all bytes except a and A
+ *
+ * On failure: leave the original node ranges intact.
  */
 static int icase_expand_class(AstNode *node)
 {
     CharRange *old = node->u.cclass.ranges;
     size_t nold = node->u.cclass.nranges;
+    CharBitmap positive;
+    CharBitmap expanded;
     CharRange *scratch = NULL;
     size_t nranges = 0;
-    size_t cap = 0;
 
-    for (size_t i = 0; i < nold; i++) {
-        unsigned char lo = old[i].lo;
-        unsigned char hi = old[i].hi;
+    /* 1. Positive set only (ignore negated here). */
+    char_bitmap_from_ranges(&positive, old, nold);
+    /* 2. Case-expand that positive set (before any negation). */
+    char_bitmap_expand_icase(&expanded, &positive);
+    /* 3. Store expanded positive ranges; negated flag stays for NFA. */
+    if (!char_bitmap_to_ranges(&expanded, &scratch, &nranges))
+        return 0;
 
-        if (!icase_push_range(&scratch, &nranges, &cap, lo, hi)) {
-            free(scratch);
-            return 0;
-        }
-        for (unsigned c = lo;; c++) {
-            if (!icase_add_char(&scratch, &nranges, &cap, (unsigned char)c)) {
-                free(scratch);
-                return 0;
-            }
-            if (c == hi)
-                break;
-        }
-    }
-
-    /* Commit: replace old ranges only after scratch is complete. */
     free(old);
     node->u.cclass.ranges = scratch;
     node->u.cclass.nranges = nranges;
+    /* node->u.cclass.negated unchanged */
     return 1;
 }
 
 /*
- * Convert a literal node into a case-insensitive character class.
- * On failure the node remains AST_LITERAL and scratch is freed.
+ * Convert a literal into a case-insensitive character class using fold maps.
+ * On failure the node remains AST_LITERAL.
  */
 static int icase_literal_to_class(AstNode *node)
 {
     unsigned char c = node->u.literal;
+    CharBitmap bm;
     CharRange *scratch = NULL;
     size_t nranges = 0;
-    size_t cap = 0;
 
-    if (!icase_add_char(&scratch, &nranges, &cap, c)) {
-        free(scratch);
+    char_bitmap_clear(&bm);
+    char_bitmap_set_icase(&bm, c);
+    if (!char_bitmap_to_ranges(&bm, &scratch, &nranges))
         return 0;
-    }
 
     node->type = AST_CHAR_CLASS;
     node->u.cclass.negated = 0;

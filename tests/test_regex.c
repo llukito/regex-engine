@@ -338,11 +338,19 @@ int main(void)
     expect_match_icase("[abc]", "B", 1);
     expect_match_icase("[abc]", "D", 0);
 
-    /* case-insensitive: negated classes */
+    /* case-insensitive: negated classes
+     * Fold the excluded set first, then negate — both 'a' and 'A' rejected. */
     expect_match_icase("[^a]", "b", 1);
     expect_match_icase("[^a]", "B", 1);
     expect_match_icase("[^a]", "a", 0);
     expect_match_icase("[^a]", "A", 0);
+    expect_match_icase("[^A]", "a", 0);
+    expect_match_icase("[^A]", "A", 0);
+    expect_match_icase("[^A]", "b", 1);
+    expect_match_icase("[^abc]", "A", 0);
+    expect_match_icase("[^abc]", "B", 0);
+    expect_match_icase("[^abc]", "C", 0);
+    expect_match_icase("[^abc]", "d", 1);
     expect_match_icase("[^a-z]", "0", 1);
     expect_match_icase("[^a-z]", "5", 1);
     expect_match_icase("[^a-z]", "m", 0);
