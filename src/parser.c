@@ -25,18 +25,7 @@ typedef struct {
     int failed;
 } Parser;
 
-/* ---- error / cursor helpers ------------------------------------------- */
-
-static void parse_error(Parser *p, const char *msg)
-{
-    if (p->failed)
-        return;
-    p->failed = 1;
-    if (p->errmsg && p->errmsg_size > 0) {
-        size_t offset = (size_t)(p->pos - p->src);
-        snprintf(p->errmsg, p->errmsg_size, "%s at offset %zu", msg, offset);
-    }
-}
+/* ---- cursor helpers --------------------------------------------------- */
 
 static int peek(const Parser *p)
 {
@@ -71,6 +60,69 @@ static int is_concat_stop(int c)
     return c == '\0' || c == '|' || c == ')';
 }
 
+/* ---- error helpers ---------------------------------------------------- */
+
+/* Human-readable description of a single input byte / EOF. */
+static void format_token(int c, char *buf, size_t bufsz)
+{
+    if (c == '\0')
+        snprintf(buf, bufsz, "end of pattern");
+    else if (c == '\n')
+        snprintf(buf, bufsz, "'\\n'");
+    else if (c == '\r')
+        snprintf(buf, bufsz, "'\\r'");
+    else if (c == '\t')
+        snprintf(buf, bufsz, "'\\t'");
+    else if (c >= 32 && c < 127)
+        snprintf(buf, bufsz, "'%c'", (char)c);
+    else
+        snprintf(buf, bufsz, "byte 0x%02x", c);
+}
+
+/* Generic message with offset (used for out-of-memory, etc.). */
+static void parse_error(Parser *p, const char *msg)
+{
+    if (p->failed)
+        return;
+    p->failed = 1;
+    if (p->errmsg && p->errmsg_size > 0) {
+        size_t offset = (size_t)(p->pos - p->src);
+        snprintf(p->errmsg, p->errmsg_size, "%s at offset %zu", msg, offset);
+    }
+}
+
+/* "expected X, found Y at offset N" — Y is the character at pos. */
+static void parse_error_expected(Parser *p, const char *expected)
+{
+    if (p->failed)
+        return;
+    p->failed = 1;
+    if (p->errmsg && p->errmsg_size > 0) {
+        char found[40];
+        format_token(peek(p), found, sizeof found);
+        size_t offset = (size_t)(p->pos - p->src);
+        snprintf(p->errmsg, p->errmsg_size,
+                 "expected %s, found %s at offset %zu",
+                 expected, found, offset);
+    }
+}
+
+/* "unexpected Y (expected X) at offset N" */
+static void parse_error_unexpected(Parser *p, const char *expected)
+{
+    if (p->failed)
+        return;
+    p->failed = 1;
+    if (p->errmsg && p->errmsg_size > 0) {
+        char found[40];
+        format_token(peek(p), found, sizeof found);
+        size_t offset = (size_t)(p->pos - p->src);
+        snprintf(p->errmsg, p->errmsg_size,
+                 "unexpected %s (expected %s) at offset %zu",
+                 found, expected, offset);
+    }
+}
+
 /* ---- forward declarations --------------------------------------------- */
 
 static AstNode *parse_alternation(Parser *p);
@@ -88,13 +140,13 @@ static AstNode *parse_char_class(Parser *p);
 static int class_char(Parser *p)
 {
     if (at_end(p)) {
-        parse_error(p, "unterminated character class");
+        parse_error_expected(p, "']' or class character");
         return -1;
     }
     if (peek(p) == '\\') {
         advance(p);
         if (at_end(p)) {
-            parse_error(p, "trailing backslash in character class");
+            parse_error_expected(p, "character after '\\' in character class");
             return -1;
         }
         return advance(p);
@@ -145,7 +197,7 @@ static AstNode *parse_char_class(Parser *p)
     for (;;) {
         if (at_end(p)) {
             free(ranges);
-            parse_error(p, "unterminated character class");
+            parse_error_expected(p, "']' to close character class");
             return NULL;
         }
 
@@ -197,13 +249,13 @@ static AstNode *parse_char_class(Parser *p)
 
     if (!match(p, ']')) {
         free(ranges);
-        parse_error(p, "unterminated character class");
+        parse_error_expected(p, "']' to close character class");
         return NULL;
     }
 
     if (nranges == 0) {
         free(ranges);
-        parse_error(p, "empty character class");
+        parse_error_unexpected(p, "non-empty character class body");
         return NULL;
     }
 
@@ -229,7 +281,7 @@ static AstNode *parse_atom(Parser *p)
             return NULL;
         if (!match(p, ')')) {
             ast_free(inner);
-            parse_error(p, "expected ')'");
+            parse_error_expected(p, "')' to close group");
             return NULL;
         }
         return inner;
@@ -267,7 +319,7 @@ static AstNode *parse_atom(Parser *p)
     if (c == '\\') {
         advance(p);
         if (at_end(p)) {
-            parse_error(p, "trailing backslash");
+            parse_error_expected(p, "character after '\\'");
             return NULL;
         }
         AstNode *n = ast_literal((unsigned char)advance(p));
@@ -278,7 +330,8 @@ static AstNode *parse_atom(Parser *p)
 
     /* Metacharacters that are not valid atoms on their own. */
     if (c == '*' || c == '+' || c == '?' || c == '|' || c == ')' || c == '\0') {
-        parse_error(p, "unexpected character");
+        parse_error_unexpected(p,
+            "atom (literal, class, group, '.', '^', or '$')");
         return NULL;
     }
 
@@ -392,7 +445,7 @@ AstNode *regex_parse(const char *pattern, char *errmsg, size_t errmsg_size)
         return NULL;
 
     if (!at_end(&p)) {
-        parse_error(&p, "unexpected character after pattern");
+        parse_error_expected(&p, "end of pattern");
         ast_free(root);
         return NULL;
     }

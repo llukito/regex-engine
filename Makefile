@@ -39,7 +39,7 @@ test: build/test_parser build/test_nfa build/test_dfa build/test_minimize build/
 	./build/test_regex
 
 match: build/match
-	@echo "Usage: ./build/match [--min] <pattern> <string>"
+	@echo "Usage: ./build/match [--min] [--icase] <pattern> <string>"
 
 build/demo: tests/demo.c $(OBJ) | build
 	$(CC) $(CFLAGS) -o $@ tests/demo.c $(OBJ)

@@ -27,18 +27,32 @@ static void expect_ok(const char *pattern, AstType root_type)
     ast_free(ast);
 }
 
-static void expect_fail(const char *pattern)
+/*
+ * Expect parse failure whose message contains every substring in needles[].
+ * needles is NULL-terminated.
+ */
+static void expect_fail_msg(const char *pattern, const char *const *needles)
 {
-    char err[128];
+    char err[256];
     AstNode *ast = regex_parse(pattern, err, sizeof err);
     if (ast) {
         fprintf(stderr, "FAIL  parse(\"%s\") should have failed\n", pattern);
         ast_free(ast);
         g_fail++;
-    } else {
-        printf("ok    parse(\"%s\") fails as expected (%s)\n", pattern, err);
-        g_pass++;
+        return;
     }
+
+    for (const char *const *n = needles; *n; n++) {
+        if (strstr(err, *n) == NULL) {
+            fprintf(stderr,
+                    "FAIL  parse(\"%s\") error \"%s\" missing \"%s\"\n",
+                    pattern, err, *n);
+            g_fail++;
+            return;
+        }
+    }
+    printf("ok    parse(\"%s\") fails: %s\n", pattern, err);
+    g_pass++;
 }
 
 /* Structural checks for precedence / shape. */
@@ -163,6 +177,89 @@ static void test_anchors_and_dot(void)
     ast_free(ast);
 }
 
+static void test_error_messages(void)
+{
+    /* Lone quantifiers: found the quantifier, expected an atom. */
+    {
+        static const char *const n[] = {
+            "unexpected '*'", "expected atom", "offset 0", NULL
+        };
+        expect_fail_msg("*", n);
+    }
+    {
+        static const char *const n[] = {
+            "unexpected '+'", "expected atom", "offset 0", NULL
+        };
+        expect_fail_msg("+", n);
+    }
+    {
+        static const char *const n[] = {
+            "unexpected '?'", "expected atom", "offset 0", NULL
+        };
+        expect_fail_msg("?", n);
+    }
+
+    /* Unclosed group: expected ')', found end of pattern. */
+    {
+        static const char *const n[] = {
+            "expected ')'", "found end of pattern", NULL
+        };
+        expect_fail_msg("(", n);
+    }
+    {
+        static const char *const n[] = {
+            "expected ')'", "found end of pattern", NULL
+        };
+        expect_fail_msg("(a|b", n);
+    }
+
+    /* Stray ')': complete empty pattern then leftover ')'. */
+    {
+        static const char *const n[] = {
+            "expected end of pattern", "found ')'", "offset 0", NULL
+        };
+        expect_fail_msg(")", n);
+    }
+
+    /* Unterminated character class. */
+    {
+        static const char *const n[] = {
+            "expected ']'", "found end of pattern", NULL
+        };
+        expect_fail_msg("[", n);
+    }
+    {
+        static const char *const n[] = {
+            "expected ']'", "found end of pattern", NULL
+        };
+        expect_fail_msg("[a-z", n);
+    }
+
+    /* Trailing backslash: expected a character after '\'. */
+    {
+        static const char *const n[] = {
+            "expected character after '\\'", "found end of pattern", NULL
+        };
+        expect_fail_msg("\\", n);
+    }
+
+    /* Extra junk after a complete expression. */
+    {
+        static const char *const n[] = {
+            "expected end of pattern", "found ')'", NULL
+        };
+        expect_fail_msg("a)", n);
+    }
+
+    /* Second quantifier has nothing to attach to: treated as a bare atom. */
+    {
+        static const char *const n[] = {
+            "unexpected '*'", "expected atom", "offset 2", NULL
+        };
+        expect_fail_msg("a**", n);
+    }
+}
+
 int main(void)
 {
     expect_ok("", AST_EMPTY);
@@ -181,14 +278,7 @@ int main(void)
     expect_ok("\\*", AST_LITERAL);
     expect_ok("a|b|c", AST_ALT);
 
-    expect_fail("*");
-    expect_fail("+");
-    expect_fail("?");
-    expect_fail("(");
-    expect_fail(")");
-    expect_fail("[");
-    expect_fail("[a-z");
-    expect_fail("\\");
+    test_error_messages();
 
     test_precedence_star_over_concat();
     test_precedence_concat_over_alt();
