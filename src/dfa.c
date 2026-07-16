@@ -1,5 +1,6 @@
 #include "dfa.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,11 +17,21 @@
  * This separates position-dependent anchors from the character step so
  * the DFA transition table is a pure function of (state, byte), while
  * still matching the NFA simulator in nfa.c.
+ *
+ * Dedup of NFA-sets uses open-addressed hashing (FNV-1a) rather than a
+ * linear scan, so large DFAs stay closer to O(1) per lookup.
  */
 
 typedef struct {
     unsigned char *bits; /* length = nnfa, 0/1 membership */
+    uint32_t hash;       /* FNV-1a of bits */
 } NfaSet;
+
+/* Hash table entry: empty when id < 0. */
+typedef struct {
+    uint32_t hash;
+    int id;
+} SetHashSlot;
 
 typedef struct {
     const Nfa *nfa;
@@ -28,6 +39,9 @@ typedef struct {
     NfaSet *sets;        /* parallel to DFA states during build */
     size_t nsets;
     size_t cap_sets;
+    SetHashSlot *ht;     /* open-addressed set → state-id map */
+    size_t ht_cap;       /* power of two */
+    size_t ht_used;
     int failed;
 } Builder;
 
@@ -168,20 +182,116 @@ static int set_accepts(const Nfa *nfa, const unsigned char *bits)
     return ok;
 }
 
-/* ---- builder: map NFA-sets to DFA state ids --------------------------- */
+/* ---- builder: map NFA-sets to DFA state ids (hashed) ------------------ */
 
-static int find_set(const Builder *b, const unsigned char *bits)
+static uint32_t set_hash(const unsigned char *bits, size_t n)
 {
-    for (size_t i = 0; i < b->nsets; i++) {
-        if (set_equal(b->sets[i].bits, bits, b->nnfa))
-            return (int)i;
+    /* FNV-1a 32-bit */
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) {
+        h ^= bits[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int ht_init(Builder *b, size_t cap)
+{
+    if (cap < 8)
+        cap = 8;
+    /* Round up to power of two. */
+    size_t c = 8;
+    while (c < cap)
+        c <<= 1;
+    SetHashSlot *ht = malloc(c * sizeof(*ht));
+    if (!ht)
+        return 0;
+    for (size_t i = 0; i < c; i++) {
+        ht[i].id = -1;
+        ht[i].hash = 0;
+    }
+    b->ht = ht;
+    b->ht_cap = c;
+    b->ht_used = 0;
+    return 1;
+}
+
+static int ht_insert_raw(SetHashSlot *ht, size_t cap,
+                         uint32_t hash, int id)
+{
+    size_t mask = cap - 1;
+    size_t i = (size_t)hash & mask;
+    for (size_t n = 0; n < cap; n++) {
+        if (ht[i].id < 0) {
+            ht[i].hash = hash;
+            ht[i].id = id;
+            return 1;
+        }
+        i = (i + 1) & mask;
+    }
+    return 0; /* table full — should not happen if load is managed */
+}
+
+static int ht_grow(Builder *b)
+{
+    size_t ncap = b->ht_cap ? b->ht_cap * 2 : 16;
+    SetHashSlot *nht = malloc(ncap * sizeof(*nht));
+    if (!nht)
+        return 0;
+    for (size_t i = 0; i < ncap; i++) {
+        nht[i].id = -1;
+        nht[i].hash = 0;
+    }
+    for (size_t i = 0; i < b->ht_cap; i++) {
+        if (b->ht[i].id < 0)
+            continue;
+        if (!ht_insert_raw(nht, ncap, b->ht[i].hash, b->ht[i].id)) {
+            free(nht);
+            return 0;
+        }
+    }
+    free(b->ht);
+    b->ht = nht;
+    b->ht_cap = ncap;
+    return 1;
+}
+
+static int find_set(const Builder *b, const unsigned char *bits, uint32_t hash)
+{
+    if (!b->ht || b->ht_cap == 0)
+        return -1;
+    size_t mask = b->ht_cap - 1;
+    size_t i = (size_t)hash & mask;
+    for (size_t n = 0; n < b->ht_cap; n++) {
+        if (b->ht[i].id < 0)
+            return -1;
+        if (b->ht[i].hash == hash) {
+            int id = b->ht[i].id;
+            if (set_equal(b->sets[id].bits, bits, b->nnfa))
+                return id;
+        }
+        i = (i + 1) & mask;
     }
     return -1;
 }
 
+static int ht_insert(Builder *b, uint32_t hash, int id)
+{
+    /* Keep load factor under ~0.5. */
+    if (b->ht_used * 2 >= b->ht_cap) {
+        if (!ht_grow(b))
+            return 0;
+    }
+    if (!ht_insert_raw(b->ht, b->ht_cap, hash, id))
+        return 0;
+    b->ht_used++;
+    return 1;
+}
+
 static int add_set(Builder *b, Dfa *dfa, const unsigned char *bits)
 {
-    int existing = find_set(b, bits);
+    uint32_t hash = set_hash(bits, b->nnfa);
+    int existing = find_set(b, bits, hash);
     if (existing >= 0)
         return existing;
 
@@ -216,7 +326,16 @@ static int add_set(Builder *b, Dfa *dfa, const unsigned char *bits)
 
     int id = (int)b->nsets;
     b->sets[b->nsets].bits = copy;
+    b->sets[b->nsets].hash = hash;
     b->nsets++;
+
+    if (!ht_insert(b, hash, id)) {
+        /* Roll back the set we just appended. */
+        free(copy);
+        b->nsets--;
+        b->failed = 1;
+        return -1;
+    }
 
     DfaState *st = &dfa->states[dfa->nstates++];
     st->id = id;
@@ -229,13 +348,17 @@ static int add_set(Builder *b, Dfa *dfa, const unsigned char *bits)
 
 static void builder_free_sets(Builder *b)
 {
-    if (!b->sets)
-        return;
-    for (size_t i = 0; i < b->nsets; i++)
-        free(b->sets[i].bits);
-    free(b->sets);
-    b->sets = NULL;
-    b->nsets = 0;
+    if (b->sets) {
+        for (size_t i = 0; i < b->nsets; i++)
+            free(b->sets[i].bits);
+        free(b->sets);
+        b->sets = NULL;
+        b->nsets = 0;
+    }
+    free(b->ht);
+    b->ht = NULL;
+    b->ht_cap = 0;
+    b->ht_used = 0;
 }
 
 /* ---- public API ------------------------------------------------------- */
@@ -257,8 +380,16 @@ Dfa *dfa_from_nfa(const Nfa *nfa)
         .sets = NULL,
         .nsets = 0,
         .cap_sets = 0,
+        .ht = NULL,
+        .ht_cap = 0,
+        .ht_used = 0,
         .failed = 0,
     };
+
+    if (!ht_init(&b, 16)) {
+        dfa_free(dfa);
+        return NULL;
+    }
 
     unsigned char *start_bits = calloc(b.nnfa, 1);
     unsigned char *move_bits = calloc(b.nnfa, 1);
@@ -267,6 +398,7 @@ Dfa *dfa_from_nfa(const Nfa *nfa)
         free(start_bits);
         free(move_bits);
         free(work_bits);
+        builder_free_sets(&b);
         dfa_free(dfa);
         return NULL;
     }
@@ -345,6 +477,11 @@ void dfa_free(Dfa *dfa)
         return;
     free(dfa->states);
     free(dfa);
+}
+
+size_t dfa_state_count(const Dfa *dfa)
+{
+    return dfa ? dfa->nstates : 0;
 }
 
 void dfa_print(const Dfa *dfa)

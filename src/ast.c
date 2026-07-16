@@ -128,12 +128,43 @@ void ast_free(AstNode *node)
     case AST_STAR:
     case AST_PLUS:
     case AST_QUESTION:
+        /* Nested quantifiers/groups: free the full child subtree. */
         ast_free(node->u.child);
         break;
-    default:
+    case AST_EMPTY:
+    case AST_LITERAL:
+    case AST_DOT:
+    case AST_ANCHOR_START:
+    case AST_ANCHOR_END:
         break;
     }
     free(node);
+}
+
+size_t ast_node_count(const AstNode *node)
+{
+    if (!node)
+        return 0;
+
+    switch (node->type) {
+    case AST_CONCAT:
+    case AST_ALT:
+        return 1
+             + ast_node_count(node->u.binary.left)
+             + ast_node_count(node->u.binary.right);
+    case AST_STAR:
+    case AST_PLUS:
+    case AST_QUESTION:
+        return 1 + ast_node_count(node->u.child);
+    case AST_CHAR_CLASS:
+    case AST_EMPTY:
+    case AST_LITERAL:
+    case AST_DOT:
+    case AST_ANCHOR_START:
+    case AST_ANCHOR_END:
+        return 1;
+    }
+    return 1;
 }
 
 const char *ast_type_name(AstType type)

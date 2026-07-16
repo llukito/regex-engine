@@ -144,6 +144,66 @@ static void test_char_class(void)
     ast_free(ast);
 }
 
+/* Deeply nested quantifiers/groups: ast_free must walk all children. */
+static void test_nested_free_and_count(void)
+{
+    char err[128];
+    /* ((((a*)*)*)*)  — four nested stars around a literal */
+    AstNode *ast = regex_parse("((((a*)*)*)*)", err, sizeof err);
+    if (!ast) {
+        fprintf(stderr, "FAIL  nested parse: %s\n", err);
+        g_fail++;
+        return;
+    }
+    size_t n = ast_node_count(ast);
+    /* 4 STAR + 1 LITERAL = 5 (groups don't add nodes; parens are structure only) */
+    if (n != 5) {
+        fprintf(stderr, "FAIL  nested count: got %zu want 5\n", n);
+        g_fail++;
+    } else {
+        printf("ok    nested ((((a*)*)*)*) has %zu AST nodes\n", n);
+        g_pass++;
+    }
+    /* Walk: STAR -> STAR -> STAR -> STAR -> LITERAL */
+    AstNode *p = ast;
+    int depth = 0;
+    while (p && p->type == AST_STAR) {
+        p = p->u.child;
+        depth++;
+    }
+    if (depth != 4 || !p || p->type != AST_LITERAL) {
+        fprintf(stderr, "FAIL  nested structure depth=%d leaf=%s\n",
+                depth, p ? ast_type_name(p->type) : "null");
+        g_fail++;
+    } else {
+        printf("ok    nested structure is 4x STAR over LITERAL\n");
+        g_pass++;
+    }
+    ast_free(ast); /* must free entire chain without leak or crash */
+    printf("ok    nested ast_free completed\n");
+    g_pass++;
+
+    /* Mix of group + alt + star: (a|b*)+ */
+    ast = regex_parse("(a|b*)+", err, sizeof err);
+    if (!ast) {
+        fprintf(stderr, "FAIL  mixed nested parse: %s\n", err);
+        g_fail++;
+        return;
+    }
+    n = ast_node_count(ast);
+    /* PLUS( ALT( LITERAL a, STAR(LITERAL b) ) ) = 1+1+1+1+1 = 5 */
+    if (n != 5) {
+        fprintf(stderr, "FAIL  mixed nested count: got %zu want 5\n", n);
+        g_fail++;
+    } else {
+        printf("ok    (a|b*)+ has %zu AST nodes\n", n);
+        g_pass++;
+    }
+    ast_free(ast);
+    printf("ok    mixed nested ast_free completed\n");
+    g_pass++;
+}
+
 static void test_anchors_and_dot(void)
 {
     char err[128];
@@ -285,6 +345,7 @@ int main(void)
     test_grouping();
     test_char_class();
     test_anchors_and_dot();
+    test_nested_free_and_count();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

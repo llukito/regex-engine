@@ -80,8 +80,15 @@ AstNode *ast_star(AstNode *child);
 AstNode *ast_plus(AstNode *child);
 AstNode *ast_question(AstNode *child);
 
-/* Free an entire AST (safe to call with NULL). */
+/*
+ * Free an entire AST (safe to call with NULL).
+ * Recursively frees binary children (concat/alt), unary children
+ * (star/plus/question), and character-class range arrays at any depth.
+ */
 void ast_free(AstNode *node);
+
+/* Count nodes in the tree (same walk as ast_free). 0 if node is NULL. */
+size_t ast_node_count(const AstNode *node);
 
 /* Pretty-print the AST to stdout (for debugging / tests). */
 void ast_print(const AstNode *node, int indent);

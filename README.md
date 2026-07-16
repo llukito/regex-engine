@@ -73,6 +73,11 @@ int main(void)
         puts("NOMATCH");
 
     regex_free(re);
+
+    /* Quick syntax check without retaining a compiled form: */
+    if (!regex_valid("a(b|c)*d"))
+        fprintf(stderr, "%s\n", regex_last_error());
+
     return 0;
 }
 ```

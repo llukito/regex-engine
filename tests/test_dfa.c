@@ -107,12 +107,14 @@ static void test_literal_dfa_shape(void)
     }
     /* At least start + dead; start accepts only after 'a'. */
     int ok = dfa->nstates >= 2
+          && dfa_state_count(dfa) == dfa->nstates
           && dfa->start >= 0
           && dfa->dead >= 0
           && !dfa->states[dfa->start].accept
           && dfa->states[dfa->states[dfa->start].trans[(unsigned char)'a']].accept
           && !dfa->states[dfa->states[dfa->start].trans[(unsigned char)'b']].accept;
     check(ok, "literal 'a' DFA start-'a'->accept, 'b' not");
+    check(dfa_state_count(NULL) == 0, "dfa_state_count(NULL) == 0");
     dfa_free(dfa);
     nfa_free(nfa);
 }

@@ -44,6 +44,9 @@ Dfa *dfa_from_nfa(const Nfa *nfa);
 
 void dfa_free(Dfa *dfa);
 
+/* Number of states in the DFA (0 if dfa is NULL). */
+size_t dfa_state_count(const Dfa *dfa);
+
 /* Print the transition table (accepting states marked) to stdout. */
 void dfa_print(const Dfa *dfa);
 

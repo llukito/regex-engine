@@ -151,6 +151,126 @@ static void test_default_vs_minimize_agree(void)
     regex_free(min);
 }
 
+static void test_regex_valid(void)
+{
+    check(regex_valid("a") == 1, "regex_valid(\"a\")");
+    check(regex_valid("a(b|c)*d") == 1, "regex_valid(\"a(b|c)*d\")");
+    check(regex_valid("") == 1, "regex_valid(\"\") empty pattern");
+    check(regex_valid("[a-z]+") == 1, "regex_valid(\"[a-z]+\")");
+    check(regex_valid(NULL) == 0, "regex_valid(NULL)");
+    check(regex_valid("*") == 0, "regex_valid(\"*\")");
+    check(regex_valid("(") == 0, "regex_valid(\"(\")");
+    check(regex_valid("[a-z") == 0, "regex_valid(\"[a-z\")");
+    check(regex_valid("\\") == 0, "regex_valid(\"\\\")");
+}
+
+static void test_last_error(void)
+{
+    char err[128];
+
+    /* Successful compile clears last error. */
+    Regex *re = regex_compile("abc", REGEX_DEFAULT, err, sizeof err);
+    check(re != NULL, "compile abc succeeds");
+    check(err[0] == '\0', "errmsg empty on success");
+    check(regex_last_error()[0] == '\0', "last_error empty on success");
+    regex_free(re);
+
+    /* Failed compile fills both errmsg and last_error. */
+    re = regex_compile("*", REGEX_DEFAULT, err, sizeof err);
+    check(re == NULL, "compile * fails");
+    check(err[0] != '\0', "errmsg set on failure");
+    check(err[strlen(err)] == '\0', "errmsg is NUL-terminated");
+    check(regex_last_error()[0] != '\0', "last_error set on failure");
+    check(strstr(regex_last_error(), "parse error") != NULL,
+          "last_error mentions parse error");
+    check(strcmp(err, regex_last_error()) == 0,
+          "errmsg matches last_error");
+
+    /* NULL errmsg still updates last_error. */
+    re = regex_compile("(", REGEX_DEFAULT, NULL, 0);
+    check(re == NULL, "compile ( fails with NULL errmsg");
+    check(regex_last_error()[0] != '\0',
+          "last_error set when errmsg is NULL");
+    check(strstr(regex_last_error(), "expected") != NULL
+          || strstr(regex_last_error(), "parse error") != NULL,
+          "last_error has useful text for unclosed group");
+
+    /* regex_valid failure also sets last_error. */
+    check(regex_valid("[") == 0, "regex_valid(\"[\") fails");
+    check(regex_last_error()[0] != '\0',
+          "last_error set after regex_valid failure");
+
+    /* Tiny errmsg buffer is still NUL-terminated. */
+    char tiny[2];
+    memset(tiny, 'X', sizeof tiny);
+    re = regex_compile("*", REGEX_DEFAULT, tiny, sizeof tiny);
+    check(re == NULL, "compile fails into tiny buffer");
+    check(tiny[sizeof tiny - 1] == '\0', "tiny errmsg is NUL-terminated");
+}
+
+static void test_ast_size_and_dfa_count(void)
+{
+    char err[128];
+    Regex *re = regex_compile("a", REGEX_DEFAULT, err, sizeof err);
+    if (!re) {
+        g_fail++;
+        return;
+    }
+    /* Single literal → one AST node; DFA has at least start + accept (+ maybe dead). */
+    check(regex_ast_size(re) == 1, "regex_ast_size(\"a\") == 1");
+    check(regex_dfa_state_count(re) >= 2, "regex_dfa_state_count(\"a\") >= 2");
+    check(regex_ast_size(NULL) == 0, "regex_ast_size(NULL) == 0");
+    check(regex_dfa_state_count(NULL) == 0, "regex_dfa_state_count(NULL) == 0");
+    regex_free(re);
+
+    re = regex_compile("ab", REGEX_DEFAULT, err, sizeof err);
+    if (!re) {
+        g_fail++;
+        return;
+    }
+    /* CONCAT(a, b) → 3 nodes */
+    check(regex_ast_size(re) == 3, "regex_ast_size(\"ab\") == 3");
+    regex_free(re);
+
+    re = regex_compile("a*", REGEX_DEFAULT, err, sizeof err);
+    if (!re) {
+        g_fail++;
+        return;
+    }
+    /* STAR(LITERAL) → 2 nodes */
+    check(regex_ast_size(re) == 2, "regex_ast_size(\"a*\") == 2");
+    regex_free(re);
+
+    re = regex_compile("a|b", REGEX_MINIMIZE, err, sizeof err);
+    if (!re) {
+        g_fail++;
+        return;
+    }
+    /* ALT(a, b) → 3 nodes; minimize may shrink DFA but AST size is pre-DFA. */
+    check(regex_ast_size(re) == 3, "regex_ast_size(\"a|b\") == 3 with MINIMIZE");
+    check(regex_dfa_state_count(re) >= 1, "minimized DFA still has states");
+    regex_free(re);
+}
+
+/* ICASE: multi-node trees still free cleanly after a full apply. */
+static void test_icase_tree_frees(void)
+{
+    char err[128];
+    /* Nested structure exercises concat/alt/star paths under ICASE. */
+    Regex *re = regex_compile("a(b|[c-e])*F", REGEX_ICASE, err, sizeof err);
+    if (!re) {
+        fprintf(stderr, "FAIL  icase tree compile: %s\n", err);
+        g_fail++;
+        return;
+    }
+    int ok = regex_match(re, "aBcf")
+          && regex_match(re, "ABCF")
+          && !regex_match(re, "aX");
+    check(ok, "icase tree matches after full rewrite");
+    regex_free(re); /* must not leak rewritten class ranges */
+    check(1, "icase tree frees without crash");
+}
+
 int main(void)
 {
     /* --- compile success + match --- */
@@ -281,6 +401,10 @@ int main(void)
     test_reuse();
     test_null_safety();
     test_default_vs_minimize_agree();
+    test_regex_valid();
+    test_last_error();
+    test_ast_size_and_dfa_count();
+    test_icase_tree_frees();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
