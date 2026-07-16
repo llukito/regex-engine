@@ -39,26 +39,37 @@ static void expect_match(const char *pattern, const char *input, int want)
     regex_free(re);
 }
 
-static void expect_match_min(const char *pattern, const char *input, int want)
+static void expect_match_flags(const char *pattern, unsigned flags,
+                               const char *input, int want, const char *tag)
 {
     char err[128];
-    Regex *re = regex_compile(pattern, REGEX_MINIMIZE, err, sizeof err);
+    Regex *re = regex_compile(pattern, flags, err, sizeof err);
     if (!re) {
-        fprintf(stderr, "FAIL  compile --min /%s/: %s\n", pattern, err);
+        fprintf(stderr, "FAIL  compile %s /%s/: %s\n", tag, pattern, err);
         g_fail++;
         return;
     }
     int got = regex_match(re, input);
     if (got != want) {
-        fprintf(stderr, "FAIL  min /%s/ on \"%s\": got %d want %d\n",
-                pattern, input, got, want);
+        fprintf(stderr, "FAIL  %s /%s/ on \"%s\": got %d want %d\n",
+                tag, pattern, input, got, want);
         g_fail++;
     } else {
-        printf("ok    min /%s/ %s \"%s\"\n",
-               pattern, want ? "matches" : "rejects", input);
+        printf("ok    %s /%s/ %s \"%s\"\n",
+               tag, pattern, want ? "matches" : "rejects", input);
         g_pass++;
     }
     regex_free(re);
+}
+
+static void expect_match_min(const char *pattern, const char *input, int want)
+{
+    expect_match_flags(pattern, REGEX_MINIMIZE, input, want, "min");
+}
+
+static void expect_match_icase(const char *pattern, const char *input, int want)
+{
+    expect_match_flags(pattern, REGEX_ICASE, input, want, "icase");
 }
 
 static void expect_compile_fail(const char *pattern)
@@ -177,6 +188,68 @@ int main(void)
     expect_match_min("a(b|c)*d", "abd", 1);
     expect_match_min("a(b|c)*d", "aXd", 0);
     expect_match_min("^[0-9]+$", "42", 1);
+
+    /* --- case-insensitive: literals --- */
+    expect_match_icase("a", "a", 1);
+    expect_match_icase("a", "A", 1);
+    expect_match_icase("A", "a", 1);
+    expect_match_icase("A", "A", 1);
+    expect_match_icase("a", "b", 0);
+    expect_match_icase("abc", "AbC", 1);
+    expect_match_icase("abc", "ABC", 1);
+    expect_match_icase("abc", "abc", 1);
+    expect_match_icase("abc", "ab", 0);
+    expect_match_icase("Hello", "hello", 1);
+    expect_match_icase("Hello", "HELLO", 1);
+    expect_match_icase("Hello", "hElLo", 1);
+    expect_match_icase("Hello", "hell", 0);
+
+    /* case-insensitive: character classes */
+    expect_match_icase("[a-z]", "m", 1);
+    expect_match_icase("[a-z]", "M", 1);
+    expect_match_icase("[A-Z]", "m", 1);
+    expect_match_icase("[A-Z]", "M", 1);
+    expect_match_icase("[a-z]+", "Hello", 1);
+    expect_match_icase("[a-z]+", "HELLO", 1);
+    expect_match_icase("[a-c]", "B", 1);
+    expect_match_icase("[a-c]", "d", 0);
+    expect_match_icase("[a-c]", "D", 0);
+    expect_match_icase("[abc]", "A", 1);
+    expect_match_icase("[abc]", "B", 1);
+    expect_match_icase("[abc]", "D", 0);
+
+    /* case-insensitive: negated classes */
+    expect_match_icase("[^a]", "b", 1);
+    expect_match_icase("[^a]", "B", 1);
+    expect_match_icase("[^a]", "a", 0);
+    expect_match_icase("[^a]", "A", 0);
+    expect_match_icase("[^a-z]", "0", 1);
+    expect_match_icase("[^a-z]", "5", 1);
+    expect_match_icase("[^a-z]", "m", 0);
+    expect_match_icase("[^a-z]", "M", 0);
+    expect_match_icase("[^abc]", "d", 1);
+    expect_match_icase("[^abc]", "D", 1);
+    expect_match_icase("[^abc]", "A", 0);
+    expect_match_icase("[^abc]", "b", 0);
+
+    /* case-insensitive with quantifiers / groups */
+    expect_match_icase("a+", "AaA", 1);
+    expect_match_icase("a(b|c)*d", "AbD", 1);
+    expect_match_icase("a(b|c)*d", "ACBCD", 1);
+    expect_match_icase("a(b|c)*d", "aXd", 0);
+
+    /* ICASE + MINIMIZE together */
+    expect_match_flags("Hello", REGEX_ICASE | REGEX_MINIMIZE, "hello", 1,
+                       "icase+min");
+    expect_match_flags("[a-z]+", REGEX_ICASE | REGEX_MINIMIZE, "Hello", 1,
+                       "icase+min");
+    expect_match_flags("[^a]", REGEX_ICASE | REGEX_MINIMIZE, "A", 0,
+                       "icase+min");
+
+    /* without ICASE, case still matters (sanity) */
+    expect_match("a", "A", 0);
+    expect_match("[a-z]", "M", 0);
+    expect_match("[^a]", "A", 1); /* 'A' is not 'a' when case-sensitive */
 
     /* --- bad patterns / error handling --- */
     expect_compile_fail(NULL);

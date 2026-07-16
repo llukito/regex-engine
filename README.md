@@ -77,20 +77,29 @@ int main(void)
 }
 ```
 
-Pass `REGEX_MINIMIZE` instead of `REGEX_DEFAULT` to minimize the DFA after
-construction (same language, usually fewer states):
+Flags can be OR'd together:
+
+| Flag | Effect |
+|------|--------|
+| `REGEX_DEFAULT` | no special options |
+| `REGEX_MINIMIZE` | minimize the DFA after construction |
+| `REGEX_ICASE` | case-insensitive literals and character classes |
 
 ```c
 Regex *re = regex_compile("a(b|c)*d", REGEX_MINIMIZE, err, sizeof err);
+Regex *ci = regex_compile("Hello", REGEX_ICASE, err, sizeof err);
+/* ci matches "hello", "HELLO", "hElLo", … */
 ```
 
 ### CLI matcher
 
 ```sh
 make build/match
-./build/match 'a(b|c)*d' abbd         # prints MATCH
-./build/match '^[0-9]+$' 42a          # prints NOMATCH
-./build/match --min 'a(b|c)*d' abbd   # same, via minimized DFA
+./build/match 'a(b|c)*d' abbd              # prints MATCH
+./build/match '^[0-9]+$' 42a               # prints NOMATCH
+./build/match --min 'a(b|c)*d' abbd        # minimized DFA
+./build/match --icase 'Hello' hElLo        # case-insensitive MATCH
+./build/match --min --icase '[a-z]+' Hi    # both flags
 ```
 
 ### Tests

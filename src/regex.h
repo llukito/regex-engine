@@ -15,10 +15,9 @@
 typedef struct Regex Regex;
 
 /* Compile-time options for regex_compile(). OR together as needed. */
-enum {
-    REGEX_DEFAULT  = 0,      /* compile to a DFA, no minimization */
-    REGEX_MINIMIZE = 1 << 0  /* minimize the DFA after construction */
-};
+#define REGEX_DEFAULT  0u
+#define REGEX_MINIMIZE (1u << 0)  /* minimize the DFA after construction */
+#define REGEX_ICASE    (1u << 1)  /* case-insensitive literals and classes */
 
 /*
  * Compile a null-terminated pattern.
@@ -29,7 +28,7 @@ enum {
  * On failure, returns NULL and, if errmsg is non-NULL and errmsg_size > 0,
  * writes a short diagnostic into errmsg (always NUL-terminated).
  */
-Regex *regex_compile(const char *pattern, int flags,
+Regex *regex_compile(const char *pattern, unsigned flags,
                      char *errmsg, size_t errmsg_size);
 
 /*
